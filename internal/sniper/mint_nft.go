@@ -1,7 +1,6 @@
 package sniper
 
 import (
-	"Sniper-Magic-Eden/internal/models"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,10 +10,12 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sniper/internal/models"
 )
 
 // GetTransactionData - returns a response of a request, then it will be signed
 func GetTransactionData(url string) ([]byte, error) {
+
 	client := &http.Client{}
 
 	req, err := http.NewRequest("GET", url, nil)

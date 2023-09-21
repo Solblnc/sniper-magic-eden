@@ -1,22 +1,20 @@
 package sniper
 
 import (
-	collections "Sniper-Magic-Eden/internal/collections"
-	"Sniper-Magic-Eden/internal/models"
 	"context"
-	"fmt"
+	"github.com/blocto/solana-go-sdk/client"
+	"github.com/blocto/solana-go-sdk/rpc"
 	"github.com/gagliardetto/solana-go"
-
-	rpc_ "github.com/gagliardetto/solana-go/rpc"
-	"github.com/gagliardetto/solana-go/rpc/ws"
-	client2 "github.com/portto/solana-go-sdk/client"
-	"github.com/portto/solana-go-sdk/rpc"
 	"log"
 	"math/rand"
 	"os"
+	"sniper/internal/models"
+	"sniper/internal/utils"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gagliardetto/solana-go/rpc/ws"
 )
 
 var (
@@ -25,44 +23,48 @@ var (
 )
 
 type Sniper struct {
-	privateKey  solana.PrivateKey
-	action      chan *models.Token
+	cli         *client.Client
+	actions     chan *models.Token
 	collections map[string]*models.Token
-	cli         *client2.Client
+	privateKey  solana.PrivateKey
 }
 
 type Options struct {
-	EndPoint   string
-	PrivateKey string
+	Endpoint   string
 	Actions    chan *models.Token
+	PrivateKey string
 }
 
-// New - returns a new sniper
 func New(options *Options) (*Sniper, error) {
-	collection, err := collections.LoadCollections()
+	collections, err := utils.LoadCollections()
 	if err != nil {
 		return nil, err
 	}
 
-	cli := client2.NewClient(options.EndPoint)
-
-	// check node health
+	cli := client.NewClient(options.Endpoint)
+	// node health check
 	if _, err = cli.GetBalance(context.Background(), MEPublicKeyStr); err != nil {
 		return nil, err
 	}
 
+	var privateKey solana.PrivateKey
+	if options.PrivateKey != "" {
+		privateKey, err = solana.PrivateKeyFromBase58(options.PrivateKey)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &Sniper{
-		privateKey:  solana.PrivateKey{},
-		action:      options.Actions,
-		collections: collection,
 		cli:         cli,
+		actions:     options.Actions,
+		collections: collections,
+		privateKey:  privateKey,
 	}, nil
 }
 
-// Start - starts a sniper service
-func (s *Sniper) Start() error {
-	// Start to listen websocket
-	client, err := ws.Connect(context.Background(), rpc_.MainNetBeta_WS)
+func (s *Sniper) Start(ctx context.Context) error {
+	client, err := ws.Connect(context.Background(), rpc.MainNetBeta_WS)
 	if err != nil {
 		return err
 	}
@@ -73,19 +75,29 @@ func (s *Sniper) Start() error {
 	}
 	defer sub.Unsubscribe()
 
-	for {
-		got, err := sub.Recv()
-		if err != nil {
-			return err
-		}
-		go s.GetTransaction(context.Background(), got.Value.Signature.String())
-	}
+	go func() {
+		for {
+			got, err := sub.Recv()
+			if err != nil {
+				log.Println(err)
+				return
+			}
 
+			if got == nil {
+				continue
+			}
+
+			go s.GetTransaction(ctx, got.Value.Signature.String())
+		}
+	}()
+
+	<-ctx.Done()
+	return nil
 }
 
 func (s *Sniper) GetTransaction(ctx context.Context, signature string) {
 	var (
-		transaction *client2.GetTransactionResponse
+		transaction *client.Transaction
 		err         error
 	)
 	// Sleep until transaction data can be obtained
@@ -103,32 +115,31 @@ func (s *Sniper) GetTransaction(ctx context.Context, signature string) {
 	}
 
 	token := s.parseTransaction(transaction)
-	if token != nil {
-		// set floor price of the collection
-		token.FloorPrice = GetFloor(token.Symbol)
-		s.action <- token
+	if token == nil {
+		return
+	}
 
-		if token.Type == "buy" || os.Getenv("ME_APIKEY") == "" || s.privateKey == nil {
+	// set floor price of the collection
+	token.FloorPrice = GetFloor(token.Symbol)
+	s.actions <- token
+
+	if token.Type == "buy" || os.Getenv("ME_APIKEY") == "" || s.privateKey == nil {
+		return
+	}
+
+	// auto buy conditions
+	if token.Price < 0.1 {
+		signature, err := s.BuyNFT(token)
+		if err != nil {
+			log.Println("Error while buying nft:", err.Error())
 			return
 		}
-
-		// auto buy conditions
-		if token.Price < 0.1 {
-			buyURL := fmt.Sprintf(`https://api-mainnet.magiceden.dev/v2/instructions/buy_now?buyer=%s&seller=%s&auctionHouseAddress=E8cU1WiRWjanGxmn96ewBgk9vPTcL6AEZ1t6F6fkgUWe&tokenMint=%s&tokenATA=%s&price=%f&sellerExpiry=-1&useV2=false&buyerCreatorRoyaltyPercent=0`,
-				s.privateKey.PublicKey(), token.Seller, token.MintAddress, token.TokenAddress, token.Price)
-
-			signature, err = MintNft(s.privateKey, buyURL)
-			if err != nil {
-				log.Println("Error while buying nft:", err.Error())
-				return
-			}
-			log.Println("Signature -", signature)
-			log.Println("Successfully bought item.")
-		}
+		log.Println("Signature -", signature)
+		log.Println("Successfully bought item.")
 	}
 }
 
-func (s Sniper) parseTransaction(transaction *client2.GetTransactionResponse) *models.Token {
+func (s *Sniper) parseTransaction(transaction *client.GetTransactionResponse) *models.Token {
 	var (
 		token *models.Token
 		ok    bool

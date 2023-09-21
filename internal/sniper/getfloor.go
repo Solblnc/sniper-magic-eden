@@ -1,44 +1,46 @@
 package sniper
 
 import (
-	"Sniper-Magic-Eden/internal/models"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
+	"sniper/internal/models"
+	"sync"
 	"time"
 )
 
 const storageTime = time.Duration(time.Second * 30)
 
 var (
-	client = &http.Client{}
-	cache  = make(map[string]*models.Floor)
+	cache = make(map[string]*models.Floor)
+	mutex sync.Mutex
+	cli   = &http.Client{}
 )
 
 func GetFloor(symbol string) float64 {
-
 	if _, ok := cache[symbol]; ok && time.Since(cache[symbol].Time) < storageTime {
-		return -1
+
 	} else {
-		client = &http.Client{}
-		req, _ := http.NewRequest("GET", fmt.Sprintf("https://api-mainnet.magiceden.dev/v2/collections/%s/stats", symbol), nil)
+		request, _ := http.NewRequest("GET", fmt.Sprintf("https://api-mainnet.magiceden.dev/v2/collections/%s/stats", symbol), nil)
+		resp, err := cli.Do(request)
+		if err != nil {
+			return cache[symbol].Value
 
-		res, _ := client.Do(req)
-
-		defer res.Body.Close()
-
-		body, _ := ioutil.ReadAll(res.Body)
-
-		var floorResponse models.Stats
-		json.Unmarshal(body, &floorResponse)
-
-		cache[symbol] = &models.Floor{
-			Value: floorResponse.FloorPrice / 1e9,
-			Time:  time.Now(),
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			return cache[symbol].Value
 		}
 
-	}
-	return cache[symbol].Value
+		body, _ := io.ReadAll(resp.Body)
+		var floorResp models.Floor
+		json.Unmarshal(body, &floorResp)
 
+		mutex.Lock()
+		defer mutex.Unlock()
+		cache[symbol] = &models.Floor{Value: floorResp.Value / 1e9, Time: time.Now()}
+	}
+
+	return cache[symbol].Value
 }
